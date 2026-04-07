@@ -567,7 +567,7 @@ export function RequestLogsPage() {
       }),
       col.display({
         id: "http",
-        header: "HTTP",
+        header: t("HTTP"),
         cell: (info) => {
           const log = info.row.original;
           return (
@@ -907,7 +907,7 @@ export function RequestLogsPage() {
                     </p>
                   </div>
                   <div>
-                    <span>HTTP</span>
+                    <span>{t("HTTP")}</span>
                     <p>
                       {detailLog.http_method || "-"} {detailLog.http_status || "-"}
                     </p>
