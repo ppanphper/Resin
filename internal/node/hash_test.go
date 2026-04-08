@@ -44,6 +44,75 @@ func TestHashFromRawOptions_DifferentConfigs(t *testing.T) {
 	}
 }
 
+func TestHashFromRawOptions_DifferentPortNotMerged(t *testing.T) {
+	a := []byte(`{"type":"shadowsocks","server":"1.2.3.4","server_port":443,"method":"aes-256-gcm","password":"secret"}`)
+	b := []byte(`{"type":"shadowsocks","server":"1.2.3.4","server_port":8443,"method":"aes-256-gcm","password":"secret"}`)
+
+	ha := HashFromRawOptions(a)
+	hb := HashFromRawOptions(b)
+	if ha == hb {
+		t.Fatal("same server with different port should not be merged")
+	}
+}
+
+func TestHashFromRawOptions_DifferentProtocolNotMerged(t *testing.T) {
+	httpNode := []byte(`{"type":"http","server":"example.com","server_port":8080,"username":"u","password":"p"}`)
+	socksNode := []byte(`{"type":"socks","server":"example.com","server_port":8080,"username":"u","password":"p"}`)
+
+	hHTTP := HashFromRawOptions(httpNode)
+	hSOCKS := HashFromRawOptions(socksNode)
+	if hHTTP == hSOCKS {
+		t.Fatal("same endpoint with different protocol should not be merged")
+	}
+}
+
+func TestHashFromRawOptions_VMessMissingAlterIDMatchesZero(t *testing.T) {
+	withoutAlterID := []byte(`{"type":"vmess","server":"Example.com","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555","security":"auto"}`)
+	withZeroAlterID := []byte(`{"type":"vmess","server":"example.com","server_port":"443","uuid":"11111111-2222-3333-4444-555555555555","security":"auto","alter_id":0}`)
+
+	h1 := HashFromRawOptions(withoutAlterID)
+	h2 := HashFromRawOptions(withZeroAlterID)
+	if h1 != h2 {
+		t.Fatalf("vmess alter_id default mismatch: %s vs %s", h1.Hex(), h2.Hex())
+	}
+}
+
+func TestHashFromRawOptions_IgnoresDialFields(t *testing.T) {
+	base := []byte(`{"type":"vmess","server":"example.com","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555","security":"auto","alter_id":0}`)
+	withDialFields := []byte(`{"type":"vmess","server":"example.com","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555","security":"auto","alter_id":0,"detour":"chain-a","bind_interface":"eth0","routing_mark":"0x20","tcp_fast_open":true}`)
+
+	h1 := HashFromRawOptions(base)
+	h2 := HashFromRawOptions(withDialFields)
+	if h1 == h2 {
+		return
+	}
+	// If this assertion fails, dedup will treat same upstream node from
+	// different subscriptions as separate entries only because local dial fields differ.
+	t.Fatalf("dial-only fields should not affect hash: %s vs %s", h1.Hex(), h2.Hex())
+}
+
+func TestHashFromRawOptions_TrojanImplicitTLSMatchesExplicitTLS(t *testing.T) {
+	implicitTLS := []byte(`{"type":"trojan","server":"example.com","server_port":443,"password":"secret"}`)
+	explicitTLS := []byte(`{"type":"trojan","server":"example.com","server_port":443,"password":"secret","tls":{"enabled":true,"server_name":"example.com"}}`)
+
+	h1 := HashFromRawOptions(implicitTLS)
+	h2 := HashFromRawOptions(explicitTLS)
+	if h1 != h2 {
+		t.Fatalf("trojan implicit/explicit tls should match: %s vs %s", h1.Hex(), h2.Hex())
+	}
+}
+
+func TestHashFromRawOptions_DifferentTransportNotMerged(t *testing.T) {
+	wsA := []byte(`{"type":"vmess","server":"example.com","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555","security":"auto","alter_id":0,"transport":{"type":"ws","path":"/a"}}`)
+	wsB := []byte(`{"type":"vmess","server":"example.com","server_port":443,"uuid":"11111111-2222-3333-4444-555555555555","security":"auto","alter_id":0,"transport":{"type":"ws","path":"/b"}}`)
+
+	h1 := HashFromRawOptions(wsA)
+	h2 := HashFromRawOptions(wsB)
+	if h1 == h2 {
+		t.Fatal("different transport params should not be merged")
+	}
+}
+
 func TestHashFromRawOptions_KeyOrderIndependent(t *testing.T) {
 	a := []byte(`{"type":"shadowsocks","server":"1.2.3.4","server_port":443}`)
 	b := []byte(`{"server_port":443,"server":"1.2.3.4","type":"shadowsocks"}`)

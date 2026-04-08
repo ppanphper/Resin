@@ -19,15 +19,20 @@ type Hash [16]byte
 var Zero Hash
 
 // HashFromRawOptions computes a node Hash from raw JSON options.
-// It unmarshals the JSON, removes the "tag" key, and re-marshals.
-// Go's encoding/json sorts map keys at all nesting levels, so the output
-// is deterministic without any manual sorting.
+// It first tries a protocol-aware semantic key to merge equivalent proxies
+// from different subscription formats. If semantic extraction is not possible,
+// it falls back to strict canonical JSON hash (with "tag" removed).
 // If JSON parsing fails, it falls back to hashing the raw bytes directly.
 func HashFromRawOptions(raw []byte) Hash {
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return hashBytes(raw)
 	}
+
+	if semanticCanonical, ok := semanticCanonicalRawOptions(m); ok {
+		return hashBytes(semanticCanonical)
+	}
+
 	delete(m, "tag")
 
 	canonical, err := json.Marshal(m)
