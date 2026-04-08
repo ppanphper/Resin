@@ -10,38 +10,56 @@ import (
 
 const semanticHashSchema = "semantic-v1"
 
+var semanticKeyBuilders = map[string]func(map[string]any) (map[string]any, bool){
+	"shadowsocks": semanticKeyShadowsocks,
+	"vmess":       semanticKeyVMess,
+	"vless":       semanticKeyVLESS,
+	"trojan":      semanticKeyTrojan,
+	"socks":       semanticKeySOCKS,
+	"http":        semanticKeyHTTP,
+	"hysteria2":   semanticKeyHysteria2,
+}
+
+var genericIgnoredRootFields = map[string]struct{}{
+	"tag":            {},
+	"detour":         {},
+	"bind_interface": {},
+	"routing_mark":   {},
+	"tcp_fast_open":  {},
+	"tcp_multi_path": {},
+	"udp_fragment":   {},
+}
+
 func semanticCanonicalRawOptions(raw map[string]any) ([]byte, bool) {
 	nodeType := normalizeNodeType(mapString(raw, "type"))
 	if nodeType == "" {
 		return nil, false
 	}
 
-	var (
-		key map[string]any
-		ok  bool
-	)
-	switch nodeType {
-	case "shadowsocks":
-		key, ok = semanticKeyShadowsocks(raw)
-	case "vmess":
-		key, ok = semanticKeyVMess(raw)
-	case "vless":
-		key, ok = semanticKeyVLESS(raw)
-	case "trojan":
-		key, ok = semanticKeyTrojan(raw)
-	case "socks":
-		key, ok = semanticKeySOCKS(raw)
-	case "http":
-		key, ok = semanticKeyHTTP(raw)
-	case "hysteria2":
-		key, ok = semanticKeyHysteria2(raw)
-	default:
-		return nil, false
+	// For known protocols, use strict protocol-aware identity extraction.
+	if builder, ok := semanticKeyBuilders[nodeType]; ok {
+		key, ok := builder(raw)
+		if !ok {
+			// Known protocol but key extraction failed: fall back to strict hash
+			// in caller to avoid accidental over-merge.
+			return nil, false
+		}
+		key["schema"] = semanticHashSchema
+		key["type"] = nodeType
+
+		canonical, err := json.Marshal(key)
+		if err != nil {
+			return nil, false
+		}
+		return canonical, true
 	}
+
+	// For unknown/new protocols, use generic semantic key so adding a new
+	// protocol does not require immediate hash-pipeline code changes.
+	key, ok := semanticKeyGeneric(raw, nodeType)
 	if !ok {
 		return nil, false
 	}
-
 	key["schema"] = semanticHashSchema
 	key["type"] = nodeType
 
@@ -50,6 +68,25 @@ func semanticCanonicalRawOptions(raw map[string]any) ([]byte, bool) {
 		return nil, false
 	}
 	return canonical, true
+}
+
+func semanticKeyGeneric(raw map[string]any, nodeType string) (map[string]any, bool) {
+	if len(raw) == 0 || nodeType == "" {
+		return nil, false
+	}
+
+	cloned := cloneMap(raw)
+
+	// Strip presentation/local-dial fields at root level.
+	for key := range cloned {
+		if _, ignored := genericIgnoredRootFields[strings.ToLower(strings.TrimSpace(key))]; ignored {
+			delete(cloned, key)
+		}
+	}
+
+	normalizeGenericEndpoint(cloned)
+	cloned["type"] = nodeType
+	return cloned, true
 }
 
 func semanticKeyShadowsocks(raw map[string]any) (map[string]any, bool) {
@@ -822,6 +859,48 @@ func toStringMap(raw any) (map[string]any, bool) {
 	}
 }
 
+func cloneMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return map[string]any{}
+	}
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		dst[key] = cloneAny(value)
+	}
+	return dst
+}
+
+func cloneAny(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		return cloneMap(t)
+	case []any:
+		out := make([]any, len(t))
+		for i := range t {
+			out[i] = cloneAny(t[i])
+		}
+		return out
+	default:
+		return t
+	}
+}
+
+func normalizeGenericEndpoint(m map[string]any) {
+	server := normalizeServerHost(firstNonEmpty(
+		mapString(m, "server"),
+		mapString(m, "address"),
+	))
+	if server != "" {
+		m["server"] = server
+		delete(m, "address")
+	}
+
+	if port, ok := mapUint(m, "server_port", "port"); ok && port > 0 {
+		m["server_port"] = port
+		delete(m, "port")
+	}
+}
+
 func normalizeNodeType(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "ss", "shadowsocks":
@@ -839,7 +918,7 @@ func normalizeNodeType(raw string) string {
 	case "hysteria2", "hy2":
 		return "hysteria2"
 	default:
-		return ""
+		return strings.ToLower(strings.TrimSpace(raw))
 	}
 }
 

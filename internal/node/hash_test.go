@@ -113,6 +113,44 @@ func TestHashFromRawOptions_DifferentTransportNotMerged(t *testing.T) {
 	}
 }
 
+func TestHashFromRawOptions_UnknownProtocol_GenericDedupIgnoresPresentationFields(t *testing.T) {
+	a := []byte(`{
+		"type":"my-new-proto",
+		"tag":"node-a",
+		"server":"EXAMPLE.com",
+		"port":"443",
+		"token":"secret",
+		"detour":"chain-a",
+		"bind_interface":"eth0"
+	}`)
+	b := []byte(`{
+		"type":"my-new-proto",
+		"tag":"node-b",
+		"server":"example.com",
+		"server_port":443,
+		"token":"secret",
+		"detour":"chain-b",
+		"routing_mark":"0x20"
+	}`)
+
+	ha := HashFromRawOptions(a)
+	hb := HashFromRawOptions(b)
+	if ha != hb {
+		t.Fatalf("unknown protocol generic dedup mismatch: %s vs %s", ha.Hex(), hb.Hex())
+	}
+}
+
+func TestHashFromRawOptions_UnknownProtocol_DifferentIdentityNotMerged(t *testing.T) {
+	a := []byte(`{"type":"my-new-proto","server":"example.com","server_port":443,"token":"secret-a"}`)
+	b := []byte(`{"type":"my-new-proto","server":"example.com","server_port":443,"token":"secret-b"}`)
+
+	ha := HashFromRawOptions(a)
+	hb := HashFromRawOptions(b)
+	if ha == hb {
+		t.Fatal("unknown protocol with different identity fields should not be merged")
+	}
+}
+
 func TestHashFromRawOptions_KeyOrderIndependent(t *testing.T) {
 	a := []byte(`{"type":"shadowsocks","server":"1.2.3.4","server_port":443}`)
 	b := []byte(`{"server_port":443,"server":"1.2.3.4","type":"shadowsocks"}`)
