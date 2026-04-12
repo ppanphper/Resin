@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -543,14 +544,17 @@ func TestSocks5Inbound_CONNECTDialFailure_ReturnsGeneralFailure(t *testing.T) {
 	t.Fatal("expected RecordResult call for SOCKS5 CONNECT failure")
 }
 
-func TestSocks5Inbound_ClientCloseCancelsPrepareDial(t *testing.T) {
+func TestSocks5Inbound_ClientCloseBeforeSuccessReplyDoesNotCancelPrepareDial(t *testing.T) {
 	env := newProxyE2EEnv(t)
 	emitter := newMockEventEmitter()
 	health := &mockHealthRecorder{}
+	dialRelease := make(chan struct{})
+	upstreamConn, upstreamPeer := net.Pipe()
+	defer upstreamPeer.Close()
 
-	setProxyE2EOutboundDialFunc(t, env, func(ctx context.Context, _ string, _ M.Socksaddr) (net.Conn, error) {
-		<-ctx.Done()
-		return nil, ctx.Err()
+	setProxyE2EOutboundDialFunc(t, env, func(_ context.Context, _ string, _ M.Socksaddr) (net.Conn, error) {
+		<-dialRelease
+		return upstreamConn, nil
 	})
 
 	inbound := NewSocks5Inbound(Socks5InboundConfig{
@@ -574,20 +578,27 @@ func TestSocks5Inbound_ClientCloseCancelsPrepareDial(t *testing.T) {
 	}
 	writeAll(t, clientConn, socks5ConnectIPv4Packet("127.0.0.1:443"))
 	_ = clientConn.Close()
+	close(dialRelease)
 
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("ServeConn should return after client close cancels prepare")
+		t.Fatal("ServeConn should return after client close and delayed dial release")
 	}
 
 	select {
 	case logEv := <-emitter.logCh:
-		if !logEv.NetOK {
-			t.Fatal("client-canceled SOCKS5 CONNECT should log net_ok=true")
+		if logEv.NetOK {
+			t.Fatal("client-closed-before-success SOCKS5 CONNECT should log net_ok=false")
 		}
 		if logEv.ProxyType != ProxyTypeSocks5Forward {
 			t.Fatalf("ProxyType: got %d, want %d", logEv.ProxyType, ProxyTypeSocks5Forward)
+		}
+		if logEv.ResinError != ErrUpstreamRequestFailed.ResinError {
+			t.Fatalf("ResinError: got %q, want %q", logEv.ResinError, ErrUpstreamRequestFailed.ResinError)
+		}
+		if logEv.UpstreamStage != "socks5_connect_response_write" {
+			t.Fatalf("UpstreamStage: got %q, want %q", logEv.UpstreamStage, "socks5_connect_response_write")
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected SOCKS5 log event")
@@ -595,17 +606,58 @@ func TestSocks5Inbound_ClientCloseCancelsPrepareDial(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 	if health.resultCalls.Load() != 0 {
-		t.Fatalf("client-canceled SOCKS5 CONNECT should not record health result, got %d calls", health.resultCalls.Load())
+		t.Fatalf("client-closed-before-success SOCKS5 CONNECT should not record health result, got %d calls", health.resultCalls.Load())
 	}
 }
 
-func TestSocks5Inbound_EarlyPayloadBeforeSuccessReplyIsRejected(t *testing.T) {
+func TestSocks5Inbound_EarlyPayloadBeforeSuccessReplyFlowsAfterSuccess(t *testing.T) {
+	env := newProxyE2EEnv(t)
 	emitter := newMockEventEmitter()
 	health := &mockHealthRecorder{}
+
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen target: %v", err)
+	}
+	defer targetLn.Close()
+
+	const payload = "early-payload-before-success"
+	targetErrCh := make(chan error, 1)
+	targetDone := make(chan struct{})
+	go func() {
+		defer close(targetDone)
+		conn, err := targetLn.Accept()
+		if err != nil {
+			targetErrCh <- err
+			return
+		}
+		defer conn.Close()
+		gotPayload := make([]byte, len(payload))
+		if _, err := io.ReadFull(conn, gotPayload); err != nil {
+			targetErrCh <- err
+			return
+		}
+		if string(gotPayload) != payload {
+			targetErrCh <- errors.New("target payload mismatch")
+			return
+		}
+		if _, err := conn.Write(gotPayload); err != nil {
+			targetErrCh <- err
+			return
+		}
+		targetErrCh <- nil
+	}()
+
+	setProxyE2EOutboundDialFunc(t, env, func(ctx context.Context, network string, _ M.Socksaddr) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, targetLn.Addr().String())
+	})
 
 	inbound := NewSocks5Inbound(Socks5InboundConfig{
 		ProxyToken:  "tok",
 		AuthVersion: string(config.AuthVersionV1),
+		Router:      env.router,
+		Pool:        env.pool,
 		Health:      health,
 		Events:      emitter,
 	})
@@ -621,17 +673,29 @@ func TestSocks5Inbound_EarlyPayloadBeforeSuccessReplyIsRejected(t *testing.T) {
 	if got := readExactly(t, reader, 2); got[1] != socks5UserPassStatusSuccess {
 		t.Fatalf("auth status: got %d, want %d", got[1], socks5UserPassStatusSuccess)
 	}
-	writeAll(t, clientConn, append(socks5ConnectIPv4Packet("127.0.0.1:443"), []byte("early-payload-before-success")...))
+
+	targetAddr := targetLn.Addr().String()
+	writeAll(t, clientConn, append(socks5ConnectIPv4Packet(targetAddr), []byte(payload)...))
 
 	reply := readExactly(t, reader, 10)
-	if reply[0] != socks5Version || reply[1] != socks5ReplyGeneralFailure {
-		t.Fatalf("reply: got %v, want general failure", reply)
+	if reply[0] != socks5Version || reply[1] != socks5ReplySucceeded {
+		t.Fatalf("reply: got %v, want success", reply)
 	}
+	echo := readExactly(t, reader, len(payload))
+	if string(echo) != payload {
+		t.Fatalf("echo payload: got %q, want %q", string(echo), payload)
+	}
+
+	_ = clientConn.Close()
 
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("ServeConn should return after rejecting early payload")
+		t.Fatal("ServeConn should return after relaying early payload")
+	}
+	<-targetDone
+	if err := <-targetErrCh; err != nil {
+		t.Fatalf("target handling failed: %v", err)
 	}
 
 	select {
@@ -639,23 +703,39 @@ func TestSocks5Inbound_EarlyPayloadBeforeSuccessReplyIsRejected(t *testing.T) {
 		if logEv.ProxyType != ProxyTypeSocks5Forward {
 			t.Fatalf("ProxyType: got %d, want %d", logEv.ProxyType, ProxyTypeSocks5Forward)
 		}
-		if logEv.UpstreamStage != "socks5_early_data_unsupported" {
-			t.Fatalf("UpstreamStage: got %q, want %q", logEv.UpstreamStage, "socks5_early_data_unsupported")
+		if logEv.TargetHost != targetAddr {
+			t.Fatalf("TargetHost: got %q, want %q", logEv.TargetHost, targetAddr)
 		}
-		if logEv.ResinError != ErrUpstreamRequestFailed.ResinError {
-			t.Fatalf("ResinError: got %q, want %q", logEv.ResinError, ErrUpstreamRequestFailed.ResinError)
+		if logEv.ResinError != "" {
+			t.Fatalf("ResinError: got %q, want empty", logEv.ResinError)
 		}
-		if logEv.NetOK {
-			t.Fatal("early-data-rejected SOCKS5 CONNECT should log net_ok=false")
+		if logEv.UpstreamStage != "" {
+			t.Fatalf("UpstreamStage: got %q, want empty", logEv.UpstreamStage)
+		}
+		if !logEv.NetOK {
+			t.Fatal("early-payload SOCKS5 CONNECT should log net_ok=true")
+		}
+		if logEv.EgressBytes != int64(len(payload)) {
+			t.Fatalf("EgressBytes: got %d, want %d", logEv.EgressBytes, len(payload))
+		}
+		if logEv.IngressBytes != int64(len(payload)) {
+			t.Fatalf("IngressBytes: got %d, want %d", logEv.IngressBytes, len(payload))
 		}
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("expected SOCKS5 rejection log event")
+		t.Fatal("expected SOCKS5 success log event")
 	}
 
-	time.Sleep(50 * time.Millisecond)
-	if health.resultCalls.Load() != 0 {
-		t.Fatalf("early payload rejection should not record health result, got %d calls", health.resultCalls.Load())
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if health.resultCalls.Load() > 0 {
+			if health.lastSuccess.Load() != 1 {
+				t.Fatalf("RecordResult lastSuccess: got %d, want 1", health.lastSuccess.Load())
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	t.Fatal("expected RecordResult call for early-payload SOCKS5 CONNECT success")
 }
 
 func TestSocks5Inbound_BaseContextCancelCancelsPrepareDial(t *testing.T) {
