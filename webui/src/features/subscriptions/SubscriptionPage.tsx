@@ -47,6 +47,7 @@ const subscriptionCreateSchema = z.object({
   ephemeral_node_evict_delay: z.string().trim().min(1, "临时节点驱逐延迟不能为空"),
   enabled: z.boolean(),
   ephemeral: z.boolean(),
+  incremental_alive_nodes: z.boolean(),
 }).superRefine((value, ctx) => {
   const content = value.content.trim();
   if (value.source_type === "remote") {
