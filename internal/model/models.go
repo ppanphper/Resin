@@ -14,6 +14,7 @@ type Platform struct {
 	ReverseProxyEmptyAccountBehavior string `json:"reverse_proxy_empty_account_behavior"`
 	ReverseProxyFixedAccountHeader   string `json:"reverse_proxy_fixed_account_header"`
 	AllocationPolicy                 string `json:"allocation_policy"`
+	PassiveCircuitBreakerDisabled    bool   `json:"passive_circuit_breaker_disabled"`
 	UpdatedAtNs                      int64  `json:"updated_at_ns"`
 }
 
@@ -27,6 +28,7 @@ type Subscription struct {
 	UpdateIntervalNs          int64  `json:"update_interval_ns"`
 	Enabled                   bool   `json:"enabled"`
 	Ephemeral                 bool   `json:"ephemeral"`
+	IncrementalAliveNodes     bool   `json:"incremental_alive_nodes"`
 	EphemeralNodeEvictDelayNs int64  `json:"ephemeral_node_evict_delay_ns"`
 	CreatedAtNs               int64  `json:"created_at_ns"`
 	UpdatedAtNs               int64  `json:"updated_at_ns"`

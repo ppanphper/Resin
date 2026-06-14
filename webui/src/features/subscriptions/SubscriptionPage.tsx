@@ -81,6 +81,7 @@ const subscriptionEditSchema = z.object({
   ephemeral_node_evict_delay: z.string().trim().min(1, "临时节点驱逐延迟不能为空"),
   enabled: z.boolean(),
   ephemeral: z.boolean(),
+  incremental_alive_nodes: z.boolean(),
 }).superRefine((value, ctx) => {
   const url = value.url.trim();
   const content = value.content.trim();
@@ -106,6 +107,7 @@ const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 const LOCAL_SOURCE_UPDATE_INTERVAL = "12h";
 const SUBSCRIPTION_DISABLE_HINT = "禁用订阅后，相关节点不会参与平台路由、健康统计或自动探测。";
 const SUBSCRIPTION_EPHEMERAL_HINT = "临时订阅的非健康节点会在一段时间后被自动删除。订阅本身不会被删除。";
+const SUBSCRIPTION_INCREMENTAL_HINT = "开启后刷新时保留当前仍存活的旧节点，仅清理失效旧节点，并合并新订阅内容；关闭后仅保留刷新后的订阅内容。";
 
 function splitRemoteURLs(raw: string): string[] {
   return raw
@@ -141,6 +143,7 @@ function subscriptionToEditForm(subscription: Subscription): SubscriptionEditFor
     ephemeral_node_evict_delay: subscription.ephemeral_node_evict_delay,
     enabled: subscription.enabled,
     ephemeral: subscription.ephemeral,
+    incremental_alive_nodes: subscription.incremental_alive_nodes,
   };
 }
 
@@ -231,6 +234,7 @@ export function SubscriptionPage() {
       ephemeral_node_evict_delay: "72h",
       enabled: true,
       ephemeral: false,
+      incremental_alive_nodes: false,
     },
   });
 
@@ -248,6 +252,7 @@ export function SubscriptionPage() {
       ephemeral_node_evict_delay: "72h",
       enabled: true,
       ephemeral: false,
+      incremental_alive_nodes: false,
     },
   });
 
@@ -302,6 +307,7 @@ export function SubscriptionPage() {
         ephemeral_node_evict_delay: "72h",
         enabled: true,
         ephemeral: false,
+        incremental_alive_nodes: false,
       });
       if (created.items.length <= 1) {
         const createdName = created.items[0]?.name ?? "";
@@ -327,6 +333,7 @@ export function SubscriptionPage() {
         ephemeral_node_evict_delay: formData.ephemeral_node_evict_delay.trim(),
         enabled: formData.enabled,
         ephemeral: formData.ephemeral,
+        incremental_alive_nodes: formData.incremental_alive_nodes,
         ...(formData.source_type === "remote"
           ? { url: formData.url.trim() }
           : { content: formData.content }),
@@ -428,6 +435,7 @@ export function SubscriptionPage() {
       ephemeral_node_evict_delay: values.ephemeral_node_evict_delay.trim(),
       enabled: values.enabled,
       ephemeral: values.ephemeral,
+      incremental_alive_nodes: values.incremental_alive_nodes,
       ...(values.source_type === "remote"
         ? { urls }
         : { content: values.content }),
@@ -847,6 +855,26 @@ export function SubscriptionPage() {
                   </div>
 
                   <div className="field-group">
+                    <label className="field-label" htmlFor="edit-sub-incremental-alive-nodes" style={{ visibility: "hidden" }}>
+                      {t("存活节点增量模式")}
+                    </label>
+                    <div className="subscription-switch-item">
+                      <label className="subscription-switch-label" htmlFor="edit-sub-incremental-alive-nodes">
+                        <span>{t("存活节点增量模式")}</span>
+                        <span
+                          className="subscription-info-icon"
+                          title={t(SUBSCRIPTION_INCREMENTAL_HINT)}
+                          aria-label={t(SUBSCRIPTION_INCREMENTAL_HINT)}
+                          tabIndex={0}
+                        >
+                          <Info size={13} />
+                        </span>
+                      </label>
+                      <Switch id="edit-sub-incremental-alive-nodes" {...editForm.register("incremental_alive_nodes")} />
+                    </div>
+                  </div>
+
+                  <div className="field-group">
                     <label className="field-label" htmlFor="edit-sub-ephemeral-evict-delay">
                       {t("临时节点驱逐延迟")}
                     </label>
@@ -862,19 +890,24 @@ export function SubscriptionPage() {
                     ) : null}
                   </div>
 
-                  <div className="subscription-switch-item">
-                    <label className="subscription-switch-label" htmlFor="edit-sub-enabled">
-                      <span>{t("启用")}</span>
-                      <span
-                        className="subscription-info-icon"
-                        title={t(SUBSCRIPTION_DISABLE_HINT)}
-                        aria-label={t(SUBSCRIPTION_DISABLE_HINT)}
-                        tabIndex={0}
-                      >
-                        <Info size={13} />
-                      </span>
+                  <div className="field-group">
+                    <label className="field-label" htmlFor="edit-sub-enabled" style={{ visibility: "hidden" }}>
+                      {t("启用")}
                     </label>
-                    <Switch id="edit-sub-enabled" {...editForm.register("enabled")} />
+                    <div className="subscription-switch-item">
+                      <label className="subscription-switch-label" htmlFor="edit-sub-enabled">
+                        <span>{t("启用")}</span>
+                        <span
+                          className="subscription-info-icon"
+                          title={t(SUBSCRIPTION_DISABLE_HINT)}
+                          aria-label={t(SUBSCRIPTION_DISABLE_HINT)}
+                          tabIndex={0}
+                        >
+                          <Info size={13} />
+                        </span>
+                      </label>
+                      <Switch id="edit-sub-enabled" {...editForm.register("enabled")} />
+                    </div>
                   </div>
 
                   <div className="platform-config-actions">
@@ -1060,6 +1093,26 @@ export function SubscriptionPage() {
               </div>
 
               <div className="field-group">
+                <label className="field-label" htmlFor="create-sub-incremental-alive-nodes" style={{ visibility: "hidden" }}>
+                  {t("存活节点增量模式")}
+                </label>
+                <div className="subscription-switch-item">
+                  <label className="subscription-switch-label" htmlFor="create-sub-incremental-alive-nodes">
+                    <span>{t("存活节点增量模式")}</span>
+                    <span
+                      className="subscription-info-icon"
+                      title={t(SUBSCRIPTION_INCREMENTAL_HINT)}
+                      aria-label={t(SUBSCRIPTION_INCREMENTAL_HINT)}
+                      tabIndex={0}
+                    >
+                      <Info size={13} />
+                    </span>
+                  </label>
+                  <Switch id="create-sub-incremental-alive-nodes" {...createForm.register("incremental_alive_nodes")} />
+                </div>
+              </div>
+
+              <div className="field-group">
                 <label className="field-label" htmlFor="create-sub-ephemeral-evict-delay">
                   {t("临时节点驱逐延迟")}
                 </label>
@@ -1075,19 +1128,24 @@ export function SubscriptionPage() {
                 ) : null}
               </div>
 
-              <div className="subscription-switch-item">
-                <label className="subscription-switch-label" htmlFor="create-sub-enabled">
-                  <span>{t("启用")}</span>
-                  <span
-                    className="subscription-info-icon"
-                    title={t(SUBSCRIPTION_DISABLE_HINT)}
-                    aria-label={t(SUBSCRIPTION_DISABLE_HINT)}
-                    tabIndex={0}
-                  >
-                    <Info size={13} />
-                  </span>
+              <div className="field-group">
+                <label className="field-label" htmlFor="create-sub-enabled" style={{ visibility: "hidden" }}>
+                  {t("启用")}
                 </label>
-                <Switch id="create-sub-enabled" {...createForm.register("enabled")} />
+                <div className="subscription-switch-item">
+                  <label className="subscription-switch-label" htmlFor="create-sub-enabled">
+                    <span>{t("启用")}</span>
+                    <span
+                      className="subscription-info-icon"
+                      title={t(SUBSCRIPTION_DISABLE_HINT)}
+                      aria-label={t(SUBSCRIPTION_DISABLE_HINT)}
+                      tabIndex={0}
+                    >
+                      <Info size={13} />
+                    </span>
+                  </label>
+                  <Switch id="create-sub-enabled" {...createForm.register("enabled")} />
+                </div>
               </div>
 
               <div className="detail-actions" style={{ justifyContent: "flex-end" }}>
